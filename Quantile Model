@@ -1,0 +1,28 @@
+import torch
+import torch.nn as nn
+import pandas
+
+
+class QuantModel(nn.Module):
+    def __init__(self, in_tabular_features=9, out_quantiles=3):
+        super(QuantModel, self).__init__()
+        self.fc1 = nn.Linear(in_tabular_features, 100)
+        self.fc2 = nn.Linear(100, 100)
+        self.fc3 = nn.Linear(100, out_quantiles)
+
+    def forward(self, x):
+        x = nn.functional.relu(self.fc1(x))
+        x = nn.functional.relu(self.fc2(x))
+        x = self.fc3(x)
+        return x
+
+
+def quantile_loss(preds, target, quantiles):
+    assert not target.requires_grad
+    assert preds.size(0) == target.size(0)
+    losses = []
+    for i, q in enumerate(quantiles):
+        errors = target - preds[:, i]
+        losses.append(torch.max((q - 1) * errors, q * errors).unsqueeze(1))
+    loss = torch.mean(torch.sum(torch.cat(losses, dim=1), dim=1))
+    return loss

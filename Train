@@ -1,0 +1,99 @@
+import copy
+from datetime import datetime, timedelta
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+from pathlib import Path
+from sklearn.model_selection import GroupKFold
+from torch.utils.data import Dataset
+from tqdm import tqdm
+import torch
+from torch.utils.data import DataLoader, Subset
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.optim import Adam
+from torch.optim.lr_scheduler import StepLR
+from torch.utils.tensorboard import SummaryWriter
+from tqdm.notebook import trange
+from time import timea import DataLoader, Subset
+
+models = []
+
+# Load the data
+data = ClinicalDataset(root_dir=root_dir, mode='train')
+folds = data.group_kfold(num_kfolds)
+t0 = time()
+
+for fold, (trainset, valset) in enumerate(folds):
+    # Prepare to save model weights
+    Path(model_dir).mkdir(parents=True, exist_ok=True)
+    now = datetime.now()
+    fname = f'{model_name}-{now.year}{now.month:02d}{now.day:02d}_{fold}.pth'
+    model_file = Path(model_dir) / fname
+
+    dataset_sizes = {'train': len(trainset), 'val': len(valset)}
+    dataloaders = {
+        'train': DataLoader(trainset, batch_size=batch_size,
+                            shuffle=True, num_workers=2),
+        'val': DataLoader(valset, batch_size=batch_size,
+                          shuffle=False, num_workers=2)
+    }
+
+    # Create the model and optimizer
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    model = QuantModel().to(device)
+    optimizer = Adam(model.parameters(), lr=learning_rate)
+    scheduler = StepLR(optimizer, step_size=20, gamma=0.5)
+    monitor = Monitor(
+        model=model,
+        es_patience=es_patience,
+        experiment_name=f'{model_name}_fold_{fold}',
+        tensorboard_dir=tensorboard_dir,
+        num_epochs=num_epochs,
+        dataset_sizes=dataset_sizes,
+        model_file=model_file
+    )
+
+    # Training loop
+    for epoch in monitor.bar:
+        for phase in ['train', 'val']:
+            if phase == 'train':
+                model.train()  # Set model to training mode
+            else:
+                model.eval()   # Set model to evaluate mode
+
+            monitor.reset_epoch()
+
+            # Iterate over data
+            for batch in dataloaders[phase]:
+                inputs = batch['features'].float().to(device)
+                targets = batch['target'].to(device)
+
+                # zero the parameter gradients
+                optimizer.zero_grad()
+                # forward
+                # track gradients if only in train
+                with torch.set_grad_enabled(phase == 'train'):
+                    preds = model(inputs)
+                    loss = quantile_loss(preds, targets, quantiles)
+                    # backward + optimize only if in training phase
+                    if phase == 'train':
+                        loss.backward()
+                        optimizer.step()
+
+                monitor.step(loss, inputs, preds, targets, phase)
+
+            # epoch statistics
+            early_stop = monitor.log_epoch(phase)
+
+        if early_stop:
+            break
+
+        # Updates the learning rate
+        scheduler.step()
+
+    # load best model weights
+    model.load_state_dict(monitor.best_model_wts)
+    models.append(model)
+
+print(f'Training complete! Time: {timedelta(seconds=time() - t0)}')

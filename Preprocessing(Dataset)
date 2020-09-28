@@ -1,0 +1,90 @@
+class PreprocessedDataset(Dataset):
+    def __init__(self, root_dir, mode, transform=None):
+        self.transform = transform
+        self.mode = mode
+
+        tr = pd.read_csv(Path(root_dir)/"train.csv")
+        tr.drop_duplicates(keep=False, inplace=True, subset=['Patient', 'Weeks'])
+        chunk = pd.read_csv(Path(root_dir)/"test.csv")
+
+        sub = pd.read_csv(Path(root_dir)/"sample_submission.csv")
+        sub['Patient'] = sub['Patient_Week'].apply(lambda x: x.split('_')[0])
+        sub['Weeks'] = sub['Patient_Week'].apply(lambda x: int(x.split('_')[-1]))
+        sub = sub[['Patient', 'Weeks', 'Confidence', 'Patient_Week']]
+        sub = sub.merge(chunk.drop('Weeks', axis=1), on="Patient")
+
+        tr['WHERE'] = 'train'
+        chunk['WHERE'] = 'val'
+        sub['WHERE'] = 'test'
+        data = tr.append([chunk, sub])
+
+        data['min_week'] = data['Weeks']
+        data.loc[data.WHERE == 'test', 'min_week'] = np.nan
+        data['min_week'] = data.groupby('Patient')['min_week'].transform('min')
+
+        base = data.loc[data.Weeks == data.min_week]
+        base = base[['Patient', 'FVC']].copy()
+        base.columns = ['Patient', 'min_FVC']
+        base['nb'] = 1
+        base['nb'] = base.groupby('Patient')['nb'].transform('cumsum')
+        base = base[base.nb == 1]
+        base.drop('nb', axis=1, inplace=True)
+
+        data = data.merge(base, on='Patient', how='left')
+        data['base_week'] = data['Weeks'] - data['min_week']
+        del base
+
+        COLS = ['Sex', 'SmokingStatus']
+        self.FE = []
+        for col in COLS:
+            for mod in data[col].unique():
+                self.FE.append(mod)
+                data[mod] = (data[col] == mod).astype(int)
+
+        data['age'] = (data['Age'] - data['Age'].min()) / \
+                      (data['Age'].max() - data['Age'].min())
+        data['BASE'] = (data['min_FVC'] - data['min_FVC'].min()) / \
+                       (data['min_FVC'].max() - data['min_FVC'].min())
+        data['week'] = (data['base_week'] - data['base_week'].min()) / \
+                       (data['base_week'].max() - data['base_week'].min())
+        data['percent'] = (data['Percent'] - data['Percent'].min()) / \
+                          (data['Percent'].max() - data['Percent'].min())
+        self.FE += ['age', 'percent', 'week', 'BASE']
+
+        self.raw = data.loc[data.WHERE == mode].reset_index()
+        del data
+
+    def __len__(self):
+        return len(self.raw)
+
+    def __getitem__(self, idx):
+        if torch.is_tensor(idx):
+            idx = idx.tolist()
+
+        sample = {
+            'patient_id': self.raw['Patient'].iloc[idx],
+            'features': self.raw[self.FE].iloc[idx].values,
+            'target': self.raw['FVC'].iloc[idx]
+        }
+        if self.transform:
+            sample = self.transform(sample)
+
+        return sample
+
+    def group_kfold(self, n_splits):
+        gkf = GroupKFold(n_splits=n_splits)
+        groups = self.raw['Patient']
+        for train_idx, val_idx in gkf.split(self.raw, self.raw, groups):
+            train = Subset(self, train_idx)
+            val = Subset(self, val_idx)
+            yield train, val
+
+    def group_split(self, test_size=0.2):
+        """To test no-kfold
+        """
+        gss = GroupShuffleSplit(n_splits=1, test_size=test_size)
+        groups = self.raw['Patient']
+        idx = list(gss.split(self.raw, self.raw, groups))
+        train = Subset(self, idx[0][0])
+        val = Subset(self, idx[0][1])
+        return train, val

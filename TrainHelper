@@ -1,0 +1,75 @@
+class TrainHelper:
+    def __init__(self, model, es_patience, experiment_name, tensorboard_dir,
+                 num_epochs, dataset_sizes, model_file):
+
+        self.model = model
+        self.model_file = model_file
+        self.es_patience = es_patience
+        self.tensorboard_dir = tensorboard_dir
+        self.dataset_sizes = dataset_sizes
+        date_time = datetime.now().strftime("%Y%m%d-%H%M")
+        log_dir = tensorboard_dir / f'{experiment_name}-{date_time}'
+        self.w = SummaryWriter(log_dir)
+
+        self.bar = trange(num_epochs, desc=experiment_name)
+
+        self.epoch_loss = {'train': np.inf, 'val': np.inf}
+        self.epoch_metric = {'train': -np.inf, 'val': -np.inf}
+        self.best_loss = np.inf
+        self.best_model_wts = None
+
+        self.e = {'train': 0, 'val': 0}  # epoch counter
+        self.t = {'train': 0, 'val': 0}  # global time-step (never resets)
+        self.running_loss = 0.0
+        self.running_metric = 0.0
+        self.es_counter = 0
+
+    def reset_epoch(self):
+        self.running_loss = 0.0
+        self.running_metric = 0.0
+
+    def step(self, loss, inputs, preds, targets, phase):
+        self.running_loss += loss.item() * inputs.size(0)
+        self.running_metric += self.metric(preds, targets).sum()
+        self.t[phase] += 1
+
+    def log_epoch(self, phase):
+        self.epoch_loss[phase] = self.running_loss / self.dataset_sizes[phase]
+        self.epoch_metric[phase] = self.running_metric / self.dataset_sizes[phase]
+        self.bar.set_postfix(
+            a_train_loss=f'{self.epoch_loss["train"]:0.1f}',
+            b_val_loss=f'{self.epoch_loss["val"]:0.1f}',
+            c_train_metric=f'{self.epoch_metric["train"]:0.4f}',
+            d_val_metric=f'{self.epoch_metric["val"]:0.4f}',
+            es_counter=self.es_counter
+        )
+        self.w.add_scalar(
+            f'Loss/{phase}', self.epoch_loss[phase], self.e[phase])
+        self.w.add_scalar(
+            f'Accuracy/{phase}', self.epoch_metric[phase], self.e[phase])
+
+        self.e[phase] += 1
+
+        # Early stop and model backup
+        early_stop = False
+        if phase == 'val':
+            if self.epoch_loss['val'] < self.best_loss:
+                self.best_loss = self.epoch_loss['val']
+                self.best_model_wts = copy.deepcopy(self.model.state_dict())
+                torch.save(self.best_model_wts, self.model_file)
+                self.es_counter = 0
+            else:
+                self.es_counter += 1
+                if self.es_counter >= self.es_patience:
+                    early_stop = True
+                    self.bar.close()
+
+        return early_stop
+
+    @staticmethod
+    def metric(preds, targets):
+        sigma = preds[:, 2] - preds[:, 0]
+        sigma[sigma < 70] = 70
+        delta = (preds[:, 1] - targets).abs()
+        delta[delta > 1000] = 1000
+        return -np.sqrt(2) * delta / sigma - torch.log(np.sqrt(2) * sigma)

@@ -1,5 +1,5 @@
 # Ideopathic Pulmonary Fibrosis FVC prediction
 ToDo :
-1.ive appropriate extentions to files
+1.Give appropriate extentions to files
 
  
